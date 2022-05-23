@@ -11,7 +11,7 @@ yum -y install wget gcc gcc-c++ autoconf automake make zlib zlib-devel pcre-deve
 安装Nginx:
     tar -zxvf nginx-1.12.2.tar.gz
     cd /home/nginx-1.12.2
-    ./configure
+    ./configure --with-http_realip_module       // 开启 realip 模块!
     make && make install
 
 默认安装位置: /usr/local/nginx
@@ -118,14 +118,250 @@ Nginx 基本配置说明
 
     常见的内置变量, 请参考 常见内置变量表
 
+    实战技巧:
+    $args_name 的使用
+
+        location / {
+            if($args_username='zhangsan') {
+                proxy_pass http://b
+            }
+            proxy_pass http://a
+        }
+
+        上述代码的请求默认路径为: http://a ; 如果URL中所带的参数 username=zhangsan 则请求路径变为 http://b
+
+    $body_bytes_sent 和 $bytes_sent 的使用技巧
+        $bytes_sent - $body_bytes_sent = HTTP 响应头的大小; 如果这差值非常大, 要注意 proxy_buffers 值的大小!
+
+        可以参考如下进行修改相关的值:
+        proxy_buffers 4 256k;
+        proxy_buffer_size 128k;
+        proxy_busy_buffers_size 256k;
+
+    $uri 和 $request_uri 的使用技巧
+        $request_uri 是原始的URL(包含请求参数), $uri 是经过一系列的重定向之后的URL(不包含请求参数)
+
+        在线上环境中排查问题时, 如果在后端服务中看到的请求 和 在 Nginx 中存放的 $request_uri 无法匹配, 可以考虑去 $uri 里面进行查找。
+
 
 ---------------------------------------------------------------------------------------------------------------------------------------
 ---------------------------------------------------------------- 第3章 强化基础配置 -------------------------------------------------------
 ---------------------------------------------------------------------------------------------------------------------------------------
+牢记 Context
+    每条指令都有自己的使用范围, 使用命令不对 Nginx 起不来, 报出异常!
+
+获取请求的IP地址
+    通常使用 $remote_addr 来获取, 但是这种地址 可能已经被反向代理的很多次的 IP 地址了;
+
+    如果架构和请求模式如下:
+    client ----> cdn ----> nginx ----> web 服务器!
+
+    以上的请求架构模式, 获取真实的 IP 地址 参考以下配置:
+
+        1、首先 Nginx 编译时需要开启 realip 模块
+            ./configure --with-http_realip_module
+
+        2、http 命令块中 配置如下
+            set_real_ip_from    CDN_IP;
+            real_ip_header      X-Forwarded-For;
+            real_ip_recursive   on;
+
+            举例(CDN_IP 可以配置多个如下):
+            # set_real_ip_from    192.168.188.39;
+            # set_real_ip_from    192.168.135.40;
+
+管理请求的行为:
+    对 IP 地址的访问控制:
+        allow 和 deny 指令使用 参考 01_allow_deny_指令的使用.png
+
+    auth 身份认证
+
+    其余安全方面的 对于 软件员而言 了解即可!
+
+Proxy 代理部分:
+    proxy_pass 简单指令:
+        使用范围: location、if in location、limit_except
+        使用格式: proxy_pass URL;                           // 简单指令必须以分号结尾!
+        使用含义: 将客户端请求 定位在 URL 上! URL 即资源位置!
+
+        举例:
+        location = /test {
+            proxy_pass http://192.168.188.39:8080;
+        }
+        含义: 将 uri 为 /test 的请求, 发送到 http://192.168.188.39:8080 服务器上!
+
+        proxy_pass 替换举例 (禁止使用):
+            location /test/v1/ {
+                # 替换 URL 的代理方法: /test/v1/ 会被替换为 /abc/
+                # 举例: /test/v1/xxx?a=1 会被替换为 /abc/xxx?a=1
+                proxy_pass http://192.168.188.39:8080/abc/;
+            }
+
+            location /aaa/ {
+                # 替换 URL 的代理方法: /aaa/ 会被替换为 /
+                # 举例: /aaa/xxx?a=1 会被替换为 /xxx?a=1
+                proxy_pass http://192.168.188.39:8080/;
+            }
+
+        proxy_pass 规范用法:
+            location /abc {
+                # 不会有任何改变, 直接传递 原始的 URL
+                proxy_pass http://192.168.188.39:8080;
+            }
+
+        proxy_pass 使用原则:
+            location 模块使用了 URI 的正则表达式 则 proxy_pass 就不能配置任何 URI 相关的东西了, 一个/都不行!
+            即禁止使用 proxy_pass http://192.168.188.39:8080/abc/; 类似的配置! 否则可能会出现不可预测的问题!
 
 
+upstream 指令块:
+    使用范围: http 指令块中!
+
+    使用格式:
+        upstream name {
+            server address [params]
+        }
+
+    使用案例:
+        upstream test_servers {
+            server 192.168.188.39:8080 max_fails=3 fail_timeout=20s weight=3;
+            server www.deepblue.com backup;
+            server www.deepblue.com down;
+        }
+
+    proxy_pass 可以代理一台服务器, 如果想代理多台服务器, 这时就要引入 upstream 指令块!
+
+    代理多台服务器案例:
+
+    http {
+
+        upstream test_servers {
+            server 192.168.188.39:8080 max_fails=3 fail_timeout=20s weight=3;
+            server 192.168.188.39:8081 max_fails=3 fail_timeout=20s weight=2;
+            server www.deepblue.com backup;
+            server www.deepblue.com down;
+        }
+
+        server {
+            listen 80;
+
+            location / {
+                proxy_pass http://test_servers;
+            }
+        }
+
+    }
+
+    server 指令参数含义:
+        upstream test_servers {
+            server 192.168.188.39:8080 max_fails=3 fail_timeout=20s weight=3;
+            server 192.168.188.39:8081 max_fails=3 fail_timeout=20s weight=2;
+            server www.deepblue.com backup;
+            server www.deepblue.com down;
+        }
+
+        down   : 标记当前服务不可用!
+        backup : 当所有可用服务器都挂掉时 backup 起作用!
+        max_fails 和 fail_timeout 是联合使用的, 即在 timeout 时间内失败的次数 大于 max_fails 则认为当前服务器不可用!
+        weight : 服务器权重值, 值越大获得请求数量占比越高!
+
+        upstream 指令块中的 server 简单指令的参数详解, 可以参考 上面的解释也可以参考: 02_upstream_server简单指令参数详解.png
+
+    故障转移 (实战中还没有见过使用的)
+        常用故障转移指令:
+        proxy_next_upstream proxy_next_upstream_tries   proxy_next_upstream_timeout 等
+
+    负载均衡
+        负载均衡策略和使用方式举例: 具体的不同指令 参考: 03_upstream负载均衡策略.png
+
+        ip_hash 使用举例:
+            upstream test_servers {
+                ip_hash;
+                server 192.168.188.39:8080 max_fails=3 fail_timeout=20s;
+                server 192.168.188.39:8081 max_fails=3 fail_timeout=20s;
+            }
+
+        least_conn 使用举例:
+            upstream test_servers {
+                least_conn;
+                server 192.168.188.39:8080 max_fails=3 fail_timeout=20s;
+                server 192.168.188.39:8081 max_fails=3 fail_timeout=20s;
+            }
+
+        根据 URL hash 举例:
+            upstream test_servers {
+                hash $request_uri;
+                server 192.168.188.39:8080 max_fails=3 fail_timeout=20s;
+                server 192.168.188.39:8081 max_fails=3 fail_timeout=20s;
+            }
+
+    利用长连接提升性能:
+        upstream 接收的连接一般是短连接, 可以配置长连接提升性能!
+
+        keepalive 配置长连接使用案例:
+            http {
+                keepalive_requests 1000;
+                keepalive_timeout 60;
+
+                upstream test_servers {
+                    server 192.168.188.39:8080 max_fails=3 fail_timeout=20s weight=3;
+                    server 192.168.188.39:8081 max_fails=3 fail_timeout=20s weight=2;
+                    keepalive 100;
+                }
+
+                server {
+                    proxy_http_version 1.1;
+                    proxy_set_header Connection "";
+
+                    location / {
+                        proxy_pass http://test_servers;
+                    }
+                }
+            }
+
+        长连接配置指令参考: 04_长连接有关指令配置详解.png
+        注意:
+            如果没有添加长连接, 在压测环境中, 可能会出现这样的情景:
+            当压测达到一定的QPS (Query Per Second, 每秒查询率) 后, Nginx服务器突然 "卡死", QPS直接降到几乎为0, 但是压测并没有停;
+            几分钟后又会自动恢复, 然后再压测一段时间后, QPS 又会突然降到接近于0。这种情况就要考虑是不是timewait的状态过多了。
+
+        
+    利用 resolver 加速对内部域名的访问 (实战中还没有见过使用的, 但从实战意义上来说是非常有用的)
+        举例说明:
+        server {
+            listen 80;
+
+            location / {
+                resolver 10.0.0.1 valid=30s;
+                resolver_timeout 5s;
+                set $upstream_host www.deepblue.com;
+                proxy_pass http://$upstream_host:8080;
+            }
+
+        }
+
+        具体可以参考: 05_location_resolver指令加速DNS解析.png
+
+
+rewrite 指令:
+    使用方式参考 07_rewrite指令使用详解.png
+
+    设置变量 set 指令:
+
+    使用范围: server location if
+    使用格式: set $param value
+    使用含义: 为当前请求设置值, 这个值可以是文本或者变量! 当请求结束后会被清除掉!
+
+    举例说明:
+        location / {
+            set $a '1';
+            set $b '2';
+            set $ab $a$b;       # 可以合并两个变量的值
+            return 200 $ab;     # 输出 12 状态码为200
+        }
 
 
 ---------------------------------------------------------------------------------------------------------------------------------------
 ---------------------------------------------------------------- 第4章 常用模块精解 ---------------------------------------------------
 ---------------------------------------------------------------------------------------------------------------------------------------
+剩下的内容以后有精力和时间再研究和学习!
